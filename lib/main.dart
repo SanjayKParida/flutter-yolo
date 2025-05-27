@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:ultralytics_yolo/yolo.dart';
 import 'package:ultralytics_yolo/yolo_view.dart';
 import 'package:ultralytics_yolo/yolo_task.dart';
-import 'package:camera/camera.dart';
 
 void main() {
   runApp(const MyApp());
@@ -31,147 +30,197 @@ class YoloDemo extends StatefulWidget {
 }
 
 class _YoloDemoState extends State<YoloDemo> {
-  final objectController = YoloViewController();
-  final poseController = YoloViewController();
-  List<String> detectedObjects = [];
-  List<String> detectedPoses = [];
-  CameraController? _cameraController;
-  List<CameraDescription>? cameras;
+  final controller = YoloViewController();
+  List<Map<String, dynamic>> objectResults = [];
+  List<Map<String, dynamic>> poseResults = [];
+  double confidenceThreshold = 0.5;
+  double iouThreshold = 0.45;
+  int _frameCounter = 0;
+  bool _processingFrame = false;
 
   @override
   void initState() {
     super.initState();
-    objectController.setThresholds(
-      confidenceThreshold: 0.5,
-      iouThreshold: 0.45,
+    controller.setThresholds(
+      confidenceThreshold: confidenceThreshold,
+      iouThreshold: iouThreshold,
     );
-    poseController.setThresholds(confidenceThreshold: 0.5, iouThreshold: 0.45);
-    _initializeCamera();
   }
 
-  Future<void> _initializeCamera() async {
-    cameras = await availableCameras();
-    if (cameras != null && cameras!.isNotEmpty) {
-      _cameraController = CameraController(
-        cameras![0],
-        ResolutionPreset.medium,
-      );
-      await _cameraController!.initialize();
-      if (mounted) setState(() {});
+  void handleDetection(List<dynamic> results) async {
+    if (_processingFrame || results.isEmpty) return;
+    _processingFrame = true;
+    _frameCounter++;
+
+    // Store object detection results
+    setState(() {
+      objectResults = List<Map<String, dynamic>>.from(results);
+    });
+
+    // Process every 2nd frame with pose model for better performance
+    if (_frameCounter % 2 == 0) {
+      try {
+        final yoloPose = YOLO(
+          modelPath: 'yolo11n-pose',
+          task: YOLOTask.pose,
+        );
+
+        // Set thresholds through controller
+        final poseController = YoloViewController();
+        poseController.setThresholds(
+          confidenceThreshold: confidenceThreshold,
+          iouThreshold: iouThreshold,
+        );
+
+        // Process with pose model
+        final poseResult = await yoloPose.predict(results.first['annotatedImage']);
+        setState(() {
+          poseResults = [poseResult];
+        });
+      } catch (e) {
+        print("Error processing pose detection: $e");
+      }
     }
-  }
 
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    super.dispose();
-  }
-
-  void handleObjectDetection(List<dynamic> results) {
-    print('Object detection results: ${results.length} objects');
-    setState(() {
-      detectedObjects =
-          results
-              .map(
-                (result) =>
-                    '${result.className ?? 'Unknown'} (${((result.confidence ?? 0) * 100).toStringAsFixed(1)}%)',
-              )
-              .toList();
-    });
-  }
-
-  void handlePoseDetection(List<dynamic> results) {
-    print('Pose detection results: ${results.length} poses');
-    setState(() {
-      detectedPoses =
-          results
-              .map(
-                (result) =>
-                    'Pose ${result.className ?? 'Unknown'} (${((result.confidence ?? 0) * 100).toStringAsFixed(1)}%)',
-              )
-              .toList();
-    });
+    _processingFrame = false;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-
     return Scaffold(
-      appBar: AppBar(title: const Text('YOLO Object & Pose Detection')),
+      appBar: AppBar(
+        title: const Text('YOLO Object & Pose Detection'),
+        backgroundColor: Colors.black87,
+      ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Row(
-              children: [
-                const Text('Confidence: '),
-                Slider(
-                  value: 0.5,
-                  min: 0.1,
-                  max: 0.9,
-                  onChanged: (value) {
-                    objectController.setConfidenceThreshold(value);
-                    poseController.setConfidenceThreshold(value);
-                  },
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Stack(
-              children: [
-                CameraPreview(_cameraController!),
-                YoloView(
-                  key: const ValueKey('pose'),
-                  controller: poseController,
-                  task: YOLOTask.pose,
-                  modelPath: 'yolo11n-pose',
-                  onResult: handlePoseDetection,
-                ),
-                YoloView(
-                  key: const ValueKey('object'),
-                  controller: objectController,
-                  task: YOLOTask.detect,
-                  modelPath: 'yolo11n',
-                  onResult: handleObjectDetection,
-                ),
-                
-              ],
-            ),
-          ),
+          // Settings Panel
           Container(
             padding: const EdgeInsets.all(8.0),
             color: Colors.black87,
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Detected Objects:',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+                Row(
+                  children: [
+                    const Text('Confidence: ',
+                        style: TextStyle(color: Colors.white)),
+                    Expanded(
+                      child: Slider(
+                        value: confidenceThreshold,
+                        min: 0.1,
+                        max: 0.9,
+                        onChanged: (value) {
+                          setState(() {
+                            confidenceThreshold = value;
+                            controller.setConfidenceThreshold(value);
+                          });
+                        },
+                      ),
+                    ),
+                    Text('${(confidenceThreshold * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Camera and Detection View
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // Base YOLO View
+                YoloView(
+                  controller: controller,
+                  task: YOLOTask.detect,
+                  modelPath: 'yolo11n',
+                  onResult: handleDetection,
+                  showNativeUI: false,
+                ),
+
+                // Custom Paint for both models
+                CustomPaint(
+                  painter: DetectionPainter(
+                    objectResults: objectResults,
+                    poseResults: poseResults,
                   ),
                 ),
-                ...detectedObjects.map(
-                  (obj) =>
-                      Text(obj, style: const TextStyle(color: Colors.white)),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Detected Poses:',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+
+                // Results Panel
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    padding: const EdgeInsets.all(8.0),
+                    color: Colors.black87.withOpacity(0.7),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Objects:',
+                                    style: TextStyle(
+                                      color: Colors.yellow,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  ...objectResults.map((result) {
+                                    final detections = (result['detections'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+                                    return Column(
+                                      children: detections.map((detection) {
+                                        return Text(
+                                          '${detection['className']}: ${(detection['confidence'] * 100).toStringAsFixed(1)}%',
+                                          style: const TextStyle(
+                                            color: Colors.yellow,
+                                            fontSize: 12,
+                                          ),
+                                        );
+                                      }).toList(),
+                                    );
+                                  }).toList(),
+                                ],
+                              ),
+                            ),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Poses:',
+                                    style: TextStyle(
+                                      color: Colors.cyan,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  ...poseResults.map((result) {
+                                    final detections = (result['detections'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+                                    return Column(
+                                      children: detections.map((detection) {
+                                        return Text(
+                                          'Person: ${(detection['confidence'] * 100).toStringAsFixed(1)}%',
+                                          style: const TextStyle(
+                                            color: Colors.cyan,
+                                            fontSize: 12,
+                                          ),
+                                        );
+                                      }).toList(),
+                                    );
+                                  }).toList(),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                ...detectedPoses.map(
-                  (pose) =>
-                      Text(pose, style: const TextStyle(color: Colors.white)),
                 ),
               ],
             ),
@@ -179,5 +228,100 @@ class _YoloDemoState extends State<YoloDemo> {
         ],
       ),
     );
+  }
+}
+
+class DetectionPainter extends CustomPainter {
+  final List<Map<String, dynamic>> objectResults;
+  final List<Map<String, dynamic>> poseResults;
+
+  DetectionPainter({
+    required this.objectResults,
+    required this.poseResults,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final objectPaint = Paint()
+      ..color = Colors.yellow
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.left,
+    );
+
+    // Draw object detection results
+    for (final result in objectResults) {
+      final detections = (result['detections'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      for (final detection in detections) {
+        final box = detection['boundingBox'] as Map<String, dynamic>;
+        final rect = Rect.fromLTWH(
+          (box['left'] as num).toDouble() * size.width,
+          (box['top'] as num).toDouble() * size.height,
+          ((box['right'] as num).toDouble() - (box['left'] as num).toDouble()) * size.width,
+          ((box['bottom'] as num).toDouble() - (box['top'] as num).toDouble()) * size.height,
+        );
+
+        // Draw box
+        canvas.drawRect(rect, objectPaint);
+
+        // Draw label
+        textPainter.text = TextSpan(
+          text: ' ${detection['className']} ${(detection['confidence'] * 100).toStringAsFixed(0)}% ',
+          style: const TextStyle(
+            color: Colors.yellow,
+            backgroundColor: Colors.black87,
+            fontSize: 12,
+          ),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(rect.left, rect.top - 15));
+      }
+    }
+
+    // Draw pose detection results
+    final posePaint = Paint()
+      ..color = Colors.cyan
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+
+    for (final result in poseResults) {
+      final detections = (result['detections'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      for (final detection in detections) {
+        final box = detection['boundingBox'] as Map<String, dynamic>;
+        final rect = Rect.fromLTWH(
+          (box['left'] as num).toDouble() * size.width,
+          (box['top'] as num).toDouble() * size.height,
+          ((box['right'] as num).toDouble() - (box['left'] as num).toDouble()) * size.width,
+          ((box['bottom'] as num).toDouble() - (box['top'] as num).toDouble()) * size.height,
+        );
+
+        // Draw box
+        canvas.drawRect(rect, posePaint);
+
+        // Draw keypoints if available
+        final keypoints = detection['keypoints'] as List?;
+        if (keypoints != null) {
+          for (final keypoint in keypoints) {
+            final x = (keypoint['x'] as num).toDouble() * size.width;
+            final y = (keypoint['y'] as num).toDouble() * size.height;
+
+            canvas.drawCircle(
+              Offset(x, y),
+              3.0,
+              Paint()..color = Colors.cyan,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(DetectionPainter oldDelegate) {
+    return objectResults != oldDelegate.objectResults ||
+        poseResults != oldDelegate.poseResults;
   }
 }
